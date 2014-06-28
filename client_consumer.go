@@ -77,7 +77,7 @@ func NewClientConsumer(sessions *ClientSessions, numberOfWorker int, exchangeNam
 	)
 
 	clientConsumer.consumer.EDurable    = false
-	clientConsumer.consumer.EAutoDelete = true
+	clientConsumer.consumer.EAutoDelete = false
 	clientConsumer.consumer.QDurable    = false
 	clientConsumer.consumer.QAutoDelete = true
 	clientConsumer.consumer.QExclusive  = true
