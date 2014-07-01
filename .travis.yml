@@ -1,25 +1,5 @@
 services:
   - rabbitmq
 
-before_install:
-  - curl --fail --silent --show-error https://raw.githubusercontent.com/vexor/vx-packages/master/vxvm | sudo tee /usr/local/bin/vxvm > /dev/null
-  - sudo chmod +x /usr/local/bin/vxvm
-  - source $(sudo vxvm install go 1.2)
-  - env
-  - go version
-  - export GOPATH=$VX_ROOT/gopath
-  - export PATH=$GOPATH/bin:$PATH
-  - export VX_ORIG_CODE_ROOT=$(pwd)
-  - export VX_NEW_CODE_ROOT=$GOPATH/src/vexor.io/$CI_PROJECT_NAME
-
-  - mkdir -p $VX_NEW_CODE_ROOT
-  - rmdir $VX_NEW_CODE_ROOT
-  - mv $VX_ORIG_CODE_ROOT $VX_NEW_CODE_ROOT
-  - ln -s $VX_NEW_CODE_ROOT $VX_ORIG_CODE_ROOT
-  - cd $VX_NEW_CODE_ROOT
-  - ls -la .
-
-script:
-  - go get -t
-  - go list
-  - go test
+go:
+  - 1.2
