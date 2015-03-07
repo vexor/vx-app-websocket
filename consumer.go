@@ -27,7 +27,7 @@ type Consumer struct {
 	QAutoDelete bool
 	QExclusive  bool
 
-  Ack         bool
+	Ack bool
 
 	pubCh *amqp.Channel
 	subCh *amqp.Channel
@@ -57,7 +57,7 @@ func (p *ConsumerPool) Open() error {
 	var err error
 
 	if p.conn == nil {
-		log.Printf("[amqp] connecting to %s", p.uri)
+		log.Printf("[info ] [amqp] connecting to %s", p.uri)
 		p.conn, err = amqp.Dial(p.uri)
 		return err
 	} else {
@@ -67,7 +67,7 @@ func (p *ConsumerPool) Open() error {
 
 func (p *ConsumerPool) Close() error {
 	if p.conn != nil {
-		log.Printf("[amqp] closing connection")
+		log.Printf("[info ] [amqp] closing connection")
 		if err := p.conn.Close(); err != nil {
 			return err
 		}
@@ -92,7 +92,7 @@ func (p *ConsumerPool) NewConsumer(exch string, queue string, exchType string) *
 func (c *Consumer) allocateChannels() error {
 	var err error
 
-	log.Println("[amqp] allocating pub/sub channels")
+	log.Println("[info ] [amqp] allocating pub/sub channels")
 
 	c.pubCh, err = c.pool.conn.Channel()
 	if err != nil {
@@ -135,7 +135,7 @@ func (c *Consumer) Publish(msg amqp.Publishing) error {
 }
 
 func (c *Consumer) declareAndBindQueue() error {
-	log.Println("[amqp] declaring queue:", c.Queue)
+	log.Println("[info ] [amqp] declaring queue:", c.Queue)
 
 	q, err := c.subCh.QueueDeclare(
 		c.Queue,       // name of the queue
@@ -152,7 +152,7 @@ func (c *Consumer) declareAndBindQueue() error {
 
 	c.Queue = q.Name
 
-	log.Printf("[amqp] binding %s to %s using [%s]", q.Name, c.Exchange, c.RoutingKey)
+	log.Printf("[info ] [amqp] binding %s to %s using [%s]", q.Name, c.Exchange, c.RoutingKey)
 	err = c.subCh.QueueBind(
 		q.Name,       // name of the queue
 		c.RoutingKey, // bindingKey
@@ -182,7 +182,7 @@ func (c *Consumer) Subscribe(fn ConsumerHandler) error {
 		return err
 	}
 
-	log.Printf("[amqp] subscribing to %s", c.Queue)
+	log.Printf("[info ] [amqp] subscribing to %s", c.Queue)
 	messages, err := c.subCh.Consume(
 		c.Queue, // name
 		"",      // consumerTag,
@@ -200,9 +200,9 @@ func (c *Consumer) Subscribe(fn ConsumerHandler) error {
 	go func() {
 		for m := range messages {
 			fn(m)
-      if c.Ack {
-        m.Ack(false)
-      }
+			if c.Ack {
+				m.Ack(false)
+			}
 		}
 		c.done <- nil
 	}()
@@ -211,13 +211,13 @@ func (c *Consumer) Subscribe(fn ConsumerHandler) error {
 }
 
 func (c *Consumer) GracefulShutdown() {
-  log.Printf("[amqp] processing graceful shutdown")
+	log.Printf("[warn ] [amqp] processing graceful shutdown")
 	c.done <- nil
 }
 
 func (c *Consumer) WaitSubscribersDone() error {
-  err := <-c.done
-  log.Printf("[amqp] shutdown")
+	err := <-c.done
+	log.Printf("[warn ] [amqp] shutdown")
 
-  return err
+	return err
 }

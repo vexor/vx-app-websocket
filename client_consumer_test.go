@@ -9,12 +9,12 @@ import (
 
 func TestNewClientConsumer(t *testing.T) {
 
-  sessions := NewClientSessions()
+	sessions := NewClientSessions()
 
 	c, err := NewClientConsumer(sessions, 10, "test.vx.sockd", "test.vx.sockd.shipper")
-  assert.Nil(t, err)
+	assert.Nil(t, err)
 
-  time.Sleep(100 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 
 	msg := amqp.Publishing{
 		Timestamp:   time.Now(),
@@ -22,16 +22,16 @@ func TestNewClientConsumer(t *testing.T) {
 		Body:        []byte("Ping"),
 	}
 
-  for i := 0 ; i < 100 ; i++ {
-    err := c.consumer.Publish(msg)
-    assert.Nil(t, err)
-  }
+	for i := 0; i < 100; i++ {
+		err := c.consumer.Publish(msg)
+		assert.Nil(t, err)
+	}
 
-  time.Sleep(100 * time.Millisecond)
+	time.Sleep(1000 * time.Millisecond)
 
-  c.Close()
-  c.Wait()
+	c.Close()
+	c.Wait()
 
-  assert.Equal(t, c.counter, 100)
+	assert.Equal(t, 100, c.counter)
 
 }
