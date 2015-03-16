@@ -10,11 +10,14 @@ import (
 func TestNewClientConsumer(t *testing.T) {
 
 	sessions := NewClientSessions()
+	consumer := NewConsumer()
 
-	c, err := NewClientConsumer(sessions, 10, "test.vx.sockd", "test.vx.sockd.shipper")
+	defer consumer.Close()
+
+	c, err := NewClientConsumer(consumer, sessions, "test.websocket", "test.websocket.consumer")
 	assert.Nil(t, err)
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	msg := amqp.Publishing{
 		Timestamp:   time.Now(),
@@ -22,16 +25,28 @@ func TestNewClientConsumer(t *testing.T) {
 		Body:        []byte("Ping"),
 	}
 
+	ch, err := consumer.Channel()
+	assert.Nil(t, err)
+
 	for i := 0; i < 100; i++ {
-		err := c.consumer.Publish(msg)
+		err := ch.Publish("test.websocket", "", false, false, msg)
 		assert.Nil(t, err)
 	}
 
-	time.Sleep(1000 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 
-	c.Close()
-	c.Wait()
+	done := make(chan bool)
 
-	assert.Equal(t, 100, c.counter)
+	go func() {
+		consumer.GracefulShutdown()
+		done <- true
+	}()
+
+	select {
+	case <-done:
+		assert.Equal(t, 100, int(c.counter))
+	case <-time.After(300 * time.Millisecond):
+		t.Errorf("Timeout")
+	}
 
 }

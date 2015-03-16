@@ -36,7 +36,6 @@ var (
 )
 
 func init() {
-	flag.IntVar(&numberOfWorkers, "workers", 10, "number of amqp workers")
 	flag.StringVar(&queueName, "queue", "websocket.%H", "name of amqp queue")
 	flag.StringVar(&exchangeName, "exch", "websocket", "name of amqp amqp exchange")
 	flag.StringVar(&httpBind, "bind", ":3003", "http address and port to use")
@@ -62,11 +61,10 @@ func expandHostName(queueName string) string {
 			hostName = osHostName
 		}
 	}
-
 	return strings.Replace(queueName, "%H", hostName, 1)
 }
 
-func installSignalHandler(consumer *ClientConsumer) {
+func installSignalHandler(consumer *Consumer) {
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc,
 		syscall.SIGHUP,
@@ -76,33 +74,39 @@ func installSignalHandler(consumer *ClientConsumer) {
 	go func() {
 		s := <-sigc
 		log.Printf("[warn ] Got signal: %s", s)
-		consumer.Close()
+		consumer.GracefulShutdown()
 		os.Exit(0)
 	}()
 }
 
-func main() {
+func catchAmqpError(consumer *Consumer) {
+	<-consumer.NotifyError(make(chan error))
 
+	consumer.Close()
+	os.Exit(1)
+}
+
+func main() {
 	log.SetFlags(0)
 
-	clientSessions := NewClientSessions()
+	sessions := NewClientSessions()
+	consumer := NewConsumer()
 
-	consumer, err := NewClientConsumer(clientSessions, numberOfWorkers, exchangeName, expandHostName(queueName))
+	client, err := NewClientConsumer(consumer, sessions, exchangeName, expandHostName(queueName))
 	if err != nil {
 		log.Fatal("[fatal] [amqp] ", err)
 	}
 
-	go watch(clientSessions, consumer)
+	go watch(sessions, client)
+	go catchAmqpError(consumer)
 
 	installSignalHandler(consumer)
 
-	http.Handle("/echo/", sockjs.NewHandler("/echo", sockjs.DefaultOptions, httpHandler(clientSessions)))
+	http.Handle("/echo/", sockjs.NewHandler("/echo", sockjs.DefaultOptions, httpHandler(sessions)))
 	log.Printf("[info ] [http] listing on %s", httpBind)
 
 	err = http.ListenAndServe(httpBind, nil)
 	if err != nil {
 		log.Fatal("[fatal] [http] ", err)
 	}
-
-	consumer.Shutdown()
 }

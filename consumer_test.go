@@ -1,163 +1,181 @@
 package main
 
 import (
+	"fmt"
 	"github.com/streadway/amqp"
 	"github.com/stretchr/testify/assert"
 	"log"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestNewPool(t *testing.T) {
-	pool := NewConsumerPool()
-	assert.Equal(t, pool.uri, "amqp://guest:guest@localhost")
-}
-
-func TestPoolOpen(t *testing.T) {
-	pool := NewConsumerPool()
-
-	assert.Nil(t, pool.conn)
-
-	pool.Open()
-	defer pool.Close()
-
-	assert.NotNil(t, pool.conn)
-}
-
-func TestPoolClose(t *testing.T) {
-	pool := NewConsumerPool()
-
-	err := pool.Open()
-	assert.Nil(t, err)
-	defer pool.Close()
-
-	assert.NotNil(t, pool.conn)
-
-	pool.Close()
-	assert.Nil(t, pool.conn)
-}
-
 func TestNewConsumer(t *testing.T) {
-	p := NewConsumerPool()
-
-	assert.Nil(t, p.Open())
-	defer p.Close()
-
-	c := p.NewConsumer("foo", "bar", "topic")
-	assert.Equal(t, c.Exchange, "foo")
-	assert.Equal(t, c.Queue, "bar")
-	assert.Equal(t, c.Type, "topic")
+	c := NewConsumer()
+	assert.Equal(t, c.uri, "amqp://guest:guest@localhost")
 }
 
-func TestSubscribeConsumer(t *testing.T) {
-	p := NewConsumerPool()
+func TestConsumerOpen(t *testing.T) {
+	c := NewConsumer()
 
-	assert.Nil(t, p.Open())
-	defer p.Close()
+	assert.Nil(t, c.conn)
 
-	c := p.NewConsumer("foo", "bar", "topic")
+	c.Open()
+	defer c.Close()
 
-	c.QAutoDelete = true
-	c.EAutoDelete = true
+	assert.NotNil(t, c.conn)
+}
+
+func TestConsumerClose(t *testing.T) {
+	c := NewConsumer()
+
+	err := c.Open()
+	assert.Nil(t, err)
+	defer c.Close()
+
+	assert.NotNil(t, c.conn)
+
+	c.Close()
+	assert.Nil(t, c.conn)
+}
+
+func TestConsumerNewSubscriber(t *testing.T) {
+	c := NewConsumer()
+
+	assert.Nil(t, c.Open())
+	defer c.Close()
 
 	handler := func(d amqp.Delivery) {
-		log.Printf("%+v", d)
-		c.done <- nil
+		log.Printf("GOT: %+v", string(d.Body))
 	}
 
-	c.Subscribe(handler)
+	err := c.NewSubscriber(
+		handler,
+		ConsumerSubscribeOptions{
+			Queue:       "foo",
+			Exchange:    "bar",
+			Type:        "topic",
+			QAutoDelete: true,
+			EAutoDelete: true,
+		},
+	)
+	assert.Nil(t, err)
+
+	pub, err := c.Channel()
+	assert.Nil(t, err)
 
 	msg := amqp.Publishing{
 		Timestamp:   time.Now(),
 		ContentType: "text/plain",
 		Body:        []byte("Ping"),
 	}
-
-	err := c.Publish(msg)
+	err = pub.Publish("bar", "", false, false, msg)
 	assert.Nil(t, err)
 
+	time.Sleep(100 * time.Millisecond)
+
+	done := make(chan bool)
+	defer close(done)
+
+	go func() {
+		c.GracefulShutdown()
+		done <- true
+	}()
+
 	select {
-	case err := <-c.done:
-		assert.Nil(t, err)
-	case <-time.After(time.Second):
+	case <-done:
+		log.Printf("Done")
+	case <-time.After(100 * time.Millisecond):
 		t.Errorf("Timeout")
 	}
 }
 
 func TestPubSub(t *testing.T) {
-	var err error
-	pubIdx := 0
-	subIdx := 0
+	counter := uint32(0)
+	c := NewConsumer()
 
-	p := NewConsumerPool()
+	assert.Nil(t, c.Open())
+	defer c.Close()
 
-	assert.Nil(t, p.Open())
-	defer p.Close()
+	pubCh, err := c.Channel()
+	assert.Nil(t, err)
 
-	c1 := p.NewConsumer("foo1", "bar1", "topic")
-
-	c1.QAutoDelete = true
-	c1.EAutoDelete = true
-
-	c2 := p.NewConsumer("foo2", "bar2", "topic")
-
-	c2.QAutoDelete = true
-	c2.EAutoDelete = true
-
-	pubHandler := func(d amqp.Delivery) {
-
-		time.Sleep(100 * time.Millisecond)
-
-		log.Printf("<-- [%n]", pubIdx)
-		msg := amqp.Publishing{
-			Timestamp:   time.Now(),
-			ContentType: "text/plain",
-			Body:        d.Body,
-		}
-		c2.Publish(msg)
-
-		pubIdx++
-		if pubIdx == 9 {
-			c1.done <- nil
+	pubHandler := func(n int) ConsumerHandler {
+		return func(d amqp.Delivery) {
+			msg := amqp.Publishing{
+				Timestamp:   time.Now(),
+				ContentType: "text/plain",
+				Body:        d.Body,
+			}
+			err = pubCh.Publish("sub", "", false, false, msg)
+			assert.Nil(t, err)
 		}
 	}
 
-	subHandler := func(d amqp.Delivery) {
-		log.Printf("--> [%n]", subIdx)
-		subIdx++
-		if subIdx == 9 {
-			c2.done <- nil
+	subHandler := func(n int) ConsumerHandler {
+		return func(d amqp.Delivery) {
+			atomic.AddUint32(&counter, 1)
 		}
-	}
-
-	err = c1.Subscribe(pubHandler)
-	assert.Nil(t, err)
-
-	err = c2.Subscribe(subHandler)
-	assert.Nil(t, err)
-
-	msg := amqp.Publishing{
-		Timestamp:   time.Now(),
-		ContentType: "text/plain",
-		Body:        []byte("Ping!"),
 	}
 
 	for i := 0; i < 10; i++ {
-		err = c1.Publish(msg)
+		err = c.NewSubscriber(
+			pubHandler(i),
+			ConsumerSubscribeOptions{
+				Queue:       "pub",
+				Exchange:    "pub",
+				Type:        "topic",
+				QAutoDelete: true,
+				EAutoDelete: true,
+			},
+		)
 		assert.Nil(t, err)
 	}
 
-	select {
-	case err = <-c1.done:
+	for i := 0; i < 10; i++ {
+		err = c.NewSubscriber(
+			subHandler(i),
+			ConsumerSubscribeOptions{
+				Queue:       "sub",
+				Exchange:    "sub",
+				Type:        "topic",
+				QAutoDelete: true,
+				EAutoDelete: true,
+			},
+		)
 		assert.Nil(t, err)
-	case <-time.After(2 * time.Second):
-		t.Errorf("Sub Timeout")
 	}
 
-	select {
-	case err = <-c2.done:
+	time.Sleep(100 * time.Millisecond)
+
+	pub, err := c.Channel()
+	assert.Nil(t, err)
+
+	for i := 0; i < 100; i++ {
+		msg := amqp.Publishing{
+			Timestamp:   time.Now(),
+			ContentType: "text/plain",
+			Body:        []byte(fmt.Sprintf("Ping %n", i)),
+		}
+		err = pub.Publish("pub", "", false, false, msg)
 		assert.Nil(t, err)
-	case <-time.After(2 * time.Second):
-		t.Errorf("Pub Timeout")
 	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	done := make(chan bool)
+
+	go func() {
+		c.GracefulShutdown()
+		done <- true
+	}()
+
+	select {
+	case <-done:
+		log.Printf("Done")
+	case <-time.After(100 * time.Millisecond):
+		t.Errorf("Timeout")
+	}
+
+	assert.Equal(t, 100, int(counter))
 }
