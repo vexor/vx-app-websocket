@@ -17,7 +17,7 @@ import _ "net/http/pprof"
 func watch(s *ClientSessions, c *ClientConsumer) {
 	for {
 		select {
-		case <-time.After(15 * time.Second):
+		case <-time.After(60 * time.Second):
 			log.Printf(
 				"[info ] [stat] %d clients, %d delivered, %d received",
 				s.Len(),

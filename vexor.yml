@@ -11,3 +11,9 @@ go:
 install:
 - sudo chown $USER:$USER -R $GOROOT/pkg
 - go get -t -v ./...
+
+deploy:
+  branch: master
+  shell:
+  - make ci.image
+  - make ci.push
