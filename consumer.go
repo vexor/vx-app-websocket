@@ -1,131 +1,231 @@
 package main
 
 import (
-	"fmt"
 	"github.com/streadway/amqp"
 	"log"
 	"os"
+	"sync"
 )
 
 type ConsumerHandler func(amqp.Delivery)
 
-type ConsumerPool struct {
-	uri  string
-	conn *amqp.Connection
+type Consumer struct {
+	uri      string
+	conn     *amqp.Connection
+	connLock *sync.Mutex
+	handLock *sync.Mutex
+	wg       *sync.WaitGroup
+	done     chan bool
+	closes   []chan error
 }
 
-type Consumer struct {
-	Queue      string
-	Exchange   string
-	RoutingKey string
-	Type       string
-
+type ConsumerSubscribeOptions struct {
+	Queue       string
+	Exchange    string
+	RoutingKey  string
+	Type        string
 	EDurable    bool
 	EAutoDelete bool
-
 	QDurable    bool
 	QAutoDelete bool
 	QExclusive  bool
-
-	Ack bool
-
-	pubCh *amqp.Channel
-	subCh *amqp.Channel
-	done  chan error
-
-	pool *ConsumerPool
+	Ack         bool
 }
 
-func rabbitmqURL() string {
+func NewConsumer() *Consumer {
+
 	uri := os.Getenv("RABBITMQ_URL")
 	if uri == "" {
 		uri = "amqp://guest:guest@localhost"
 	}
-	return uri
-}
 
-func NewConsumerPool() *ConsumerPool {
-	uri := rabbitmqURL()
-	pool := &ConsumerPool{
-		uri: uri,
+	consumer := &Consumer{
+		uri:      uri,
+		connLock: &sync.Mutex{},
+		handLock: &sync.Mutex{},
+		wg:       new(sync.WaitGroup),
 	}
-
-	return pool
+	return consumer
 }
 
-func (p *ConsumerPool) Open() error {
+func (self *Consumer) Open() error {
+	self.connLock.Lock()
+	defer self.connLock.Unlock()
+
 	var err error
 
-	if p.conn == nil {
-		log.Printf("[info ] [amqp] connecting to %s", p.uri)
-		p.conn, err = amqp.Dial(p.uri)
-		return err
-	} else {
+	if self.conn != nil {
 		return nil
 	}
-}
 
-func (p *ConsumerPool) Close() error {
-	if p.conn != nil {
-		log.Printf("[info ] [amqp] closing connection")
-		if err := p.conn.Close(); err != nil {
-			return err
-		}
-		p.conn = nil
-	}
-	return nil
-}
-
-func (p *ConsumerPool) NewConsumer(exch string, queue string, exchType string) *Consumer {
-
-	c := &Consumer{
-		Queue:    queue,
-		Exchange: exch,
-		Type:     exchType,
-		done:     make(chan error),
-		pool:     p,
-	}
-
-	return c
-}
-
-func (c *Consumer) allocateChannels() error {
-	var err error
-
-	log.Println("[info ] [amqp] allocating pub/sub channels")
-
-	c.pubCh, err = c.pool.conn.Channel()
-	if err != nil {
-		return err
-	}
-
-	c.subCh, err = c.pool.conn.Channel()
-	if err != nil {
-		c.pubCh.Close()
-		c.pubCh = nil
+	if self.conn, err = amqp.Dial(self.uri); err != nil {
+		self.conn = nil
 		return err
 	}
 
 	go func() {
-		c.done <- fmt.Errorf("[amqp] connection closed: %s\n", <-c.pool.conn.NotifyClose(make(chan *amqp.Error)))
+		err := <-self.conn.NotifyClose(make(chan *amqp.Error))
+		self.handleError(err)
 	}()
 
-	return err
+	self.done = make(chan bool)
+
+	log.Printf("[info ] [amqp] successfuly connected")
+	return nil
 }
 
-func (c *Consumer) declareExchange() error {
-	err := c.subCh.ExchangeDeclare(
-		c.Exchange,    // name of the exchange
-		c.Type,        // type
-		c.EDurable,    // durable
-		c.EAutoDelete, // delete when complete
+func (self *Consumer) Close() error {
+	defer self.connLock.Unlock()
+	self.connLock.Lock()
+
+	if self.conn == nil {
+		return nil
+	}
+
+	if err := self.conn.Close(); err != nil {
+		return err
+	}
+	self.conn = nil
+	self.done = nil
+
+	log.Printf("[info ] [amqp] connection closed")
+
+	return nil
+}
+
+func (self *Consumer) GracefulShutdown() error {
+	log.Printf("[warn ] [amqp] process graceful shutdown")
+
+	close(self.done)
+
+	self.wg.Wait()
+
+	if err := self.Close(); err != nil {
+		return err
+	}
+
+	log.Printf("[warn ] [amqp] shutdown complete")
+
+	return nil
+}
+
+func (self *Consumer) Channel() (*amqp.Channel, error) {
+	return self.conn.Channel()
+}
+
+func (self *Consumer) NewSubscriber(fn ConsumerHandler, o ConsumerSubscribeOptions) error {
+
+	ch, err := self.Channel()
+	if err != nil {
+		return err
+	}
+
+	err = ch.ExchangeDeclare(
+		o.Exchange,    // name of the exchange
+		o.Type,        // type
+		o.EDurable,    // durable
+		o.EAutoDelete, // delete when complete
 		false,         // internal
 		false,         // noWait
 		nil,           // arguments
 	)
-	return err
+	if err != nil {
+		ch.Close()
+		return err
+	}
+
+	q, err := ch.QueueDeclare(
+		o.Queue,       // name of the queue
+		o.QDurable,    // durable
+		o.QAutoDelete, // delete when usused
+		o.QExclusive,  // exclusive
+		false,         // noWait
+		nil,           // arguments
+	)
+	if err != nil {
+		ch.Close()
+		return err
+	}
+
+	log.Printf(
+		"[info ] [amqp] binding %s to %s using [%s]",
+		q.Name, o.Exchange, o.RoutingKey,
+	)
+	err = ch.QueueBind(
+		q.Name,       // name of the queue
+		o.RoutingKey, // bindingKey
+		o.Exchange,   // sourceExchange
+		false,        // noWait
+		nil,          // arguments
+	)
+	if err != nil {
+		ch.Close()
+		return err
+	}
+
+	log.Printf("[info ] [amqp] consume %s", q.Name)
+	messages, err := ch.Consume(
+		q.Name, // name
+		"",     // consumerTag,
+		!o.Ack, // auto ack
+		false,  // exclusive
+		false,  // noLocal
+		false,  // noWait
+		nil,    // arguments
+	)
+	if err != nil {
+		ch.Close()
+		return err
+	}
+
+	self.wg.Add(1)
+	go self.handle(ch, fn, o.Ack, messages)
+
+	return nil
 }
 
+func (self *Consumer) handleError(err *amqp.Error) {
+	if err != nil {
+		log.Printf("[error] [amqp] %s", err)
+		for _, c := range self.closes {
+			c <- err
+		}
+	}
+}
+
+func (self *Consumer) NotifyError(c chan error) chan error {
+	self.handLock.Lock()
+	defer self.handLock.Unlock()
+
+	self.closes = append(self.closes, c)
+	return c
+}
+
+func (self *Consumer) handle(ch *amqp.Channel, fn ConsumerHandler, ack bool, messages <-chan amqp.Delivery) {
+	defer ch.Close()
+	defer self.wg.Done()
+
+	for {
+		select {
+		case message, ok := <-messages:
+			// connection level error
+			if !ok {
+				return
+			}
+
+			fn(message)
+
+			if ack {
+				message.Ack(false)
+			}
+		case <-self.done:
+			// gracefull shutdown
+			return
+		}
+	}
+}
+
+/*
 func (c *Consumer) Publish(msg amqp.Publishing) error {
 	err := c.pubCh.Publish(c.Exchange, c.RoutingKey, false, false, msg)
 	if err != nil {
@@ -133,91 +233,4 @@ func (c *Consumer) Publish(msg amqp.Publishing) error {
 	}
 	return nil
 }
-
-func (c *Consumer) declareAndBindQueue() error {
-	log.Println("[info ] [amqp] declaring queue:", c.Queue)
-
-	q, err := c.subCh.QueueDeclare(
-		c.Queue,       // name of the queue
-		c.QDurable,    // durable
-		c.QAutoDelete, // delete when usused
-		c.QExclusive,  // exclusive
-		false,         // noWait
-		nil,           // arguments
-	)
-
-	if err != nil {
-		return err
-	}
-
-	c.Queue = q.Name
-
-	log.Printf("[info ] [amqp] binding %s to %s using [%s]", q.Name, c.Exchange, c.RoutingKey)
-	err = c.subCh.QueueBind(
-		q.Name,       // name of the queue
-		c.RoutingKey, // bindingKey
-		c.Exchange,   // sourceExchange
-		false,        // noWait
-		nil,          // arguments
-	)
-
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (c *Consumer) Subscribe(fn ConsumerHandler) error {
-
-	if err := c.allocateChannels(); err != nil {
-		return err
-	}
-
-	if err := c.declareExchange(); err != nil {
-		return err
-	}
-
-	if err := c.declareAndBindQueue(); err != nil {
-		return err
-	}
-
-	log.Printf("[info ] [amqp] subscribing to %s", c.Queue)
-	messages, err := c.subCh.Consume(
-		c.Queue, // name
-		"",      // consumerTag,
-		!c.Ack,  // noAck
-		false,   // exclusive
-		false,   // noLocal
-		false,   // noWait
-		nil,     // arguments
-	)
-
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		for m := range messages {
-			fn(m)
-			if c.Ack {
-				m.Ack(false)
-			}
-		}
-		c.done <- nil
-	}()
-
-	return nil
-}
-
-func (c *Consumer) GracefulShutdown() {
-	log.Printf("[warn ] [amqp] processing graceful shutdown")
-	c.done <- nil
-}
-
-func (c *Consumer) WaitSubscribersDone() error {
-	err := <-c.done
-	log.Printf("[warn ] [amqp] shutdown")
-
-	return err
-}
+*/
