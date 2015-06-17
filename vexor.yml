@@ -10,7 +10,9 @@ go:
 
 install:
 - sudo chown $USER:$USER -R $GOROOT/pkg
-- go get -t -v ./...
+- make deps
+
+script: make test
 
 deploy:
   branch: master
