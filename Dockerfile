@@ -1,9 +1,9 @@
-FROM golang:1.3.3
+FROM golang:1.4.2
 
 ADD . /app/vx-app-websocket
 WORKDIR /app/vx-app-websocket
 
-RUN make gom && make
+RUN make deps && make build
 
-CMD ["/app/vx-app-websocket/vx-app-websocket"]
+CMD ["/app/vx-app-websocket/bin/server"]
 EXPOSE 3003

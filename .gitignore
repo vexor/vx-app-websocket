@@ -1,4 +1,4 @@
-web
-_vendor
-vx-app-websocket
+vendor/src
+bin
 tags
+pkg
